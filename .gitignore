@@ -1,0 +1,29 @@
+# everything the pipeline produces lives in artifacts/ (hundreds of GB): never commit it
+artifacts/
+*.pt
+*.pt.prev
+*.bin
+*.npy
+*.npz
+*.tmp
+*.bad
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# local config / editors / OS
+.env
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+wandb/

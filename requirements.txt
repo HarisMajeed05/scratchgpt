@@ -1,0 +1,14 @@
+# For GPU training install PyTorch first with the CUDA build that matches your card, e.g. for an RTX 50-series (Blackwell):
+#   pip install torch --index-url https://download.pytorch.org/whl/cu128
+# Then:  pip install -e ".[dev]"   (reads pyproject.toml). This file is for people who prefer plain requirements.
+torch>=2.4
+numpy
+tokenizers>=0.19
+datasets>=2.18
+pillow
+huggingface_hub
+fastapi
+uvicorn
+pytest
+httpx
+ruff

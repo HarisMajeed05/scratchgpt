@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scratchgpt"
+version = "0.1.0"
+description = "A multimodal GPT (text, code, images) trained completely from scratch on one consumer GPU: tokenizer, VQ-VAE, pretraining, SFT, continual learning and an OpenAI-compatible server."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+  "torch>=2.4",
+  "numpy",
+  "tokenizers>=0.19",
+  "datasets>=2.18",   # 2.18+ can save/restore a streaming dataset's position (instant, crash-safe resume)
+  "pillow",
+  "huggingface_hub",
+  "fastapi",
+  "uvicorn",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "httpx", "ruff"]
+
+[project.scripts]
+scratchgpt = "scratchgpt.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+scratchgpt = ["server/static/*.html"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 120
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501", "E741", "B905"]   # long lines are fine in this codebase

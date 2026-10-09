@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>scratchgpt</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 15px/1.5 system-ui, sans-serif; max-width: 780px; margin: 0 auto; padding: 1rem; }
+  #log { min-height: 55vh; }
+  .msg { margin: .8rem 0; white-space: pre-wrap; }
+  .msg b { display: block; font-size: 12px; opacity: .6; }
+  .msg img { display: block; margin-top: .4rem; width: 256px; image-rendering: auto; border-radius: 8px; }
+  textarea { width: 100%; box-sizing: border-box; font: inherit; padding: .6rem; border-radius: 8px; }
+  button { font: inherit; margin: .3rem .3rem 0 0; padding: .35rem .8rem; border-radius: 8px; cursor: pointer; }
+</style>
+</head>
+<body>
+<div id="log"></div>
+<textarea id="q" rows="3" placeholder="Message (Enter to send, Shift+Enter for a new line)"></textarea>
+<button onclick="send()">Send</button>
+<button onclick="fix()">Fix last answer</button>
+<button onclick="undo()">Undo last fix</button>
+<button onclick="newChat()">New chat</button>
+<button onclick="localStorage.setItem('k', prompt('API key') || '')">API key</button>
+<script>
+const log = document.getElementById('log'), q = document.getElementById('q');
+let history = [];
+const hdr = () => ({'Content-Type': 'application/json', 'x-api-key': localStorage.getItem('k') || ''});
+const esc = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+function render(el, text) {   // text + markdown data-URL images -> HTML
+  el.innerHTML = esc(text).replace(/!\[[^\]]*\]\((data:image\/[^)\s]+)\)/g, '<img src="$1">');
+}
+function add(role, text) {
+  const d = document.createElement('div'); d.className = 'msg';
+  d.innerHTML = '<b>' + role + '</b><span></span>';
+  render(d.querySelector('span'), text); log.appendChild(d); d.scrollIntoView(); return d.querySelector('span');
+}
+async function send() {
+  const p = q.value.trim(); if (!p) return; q.value = '';
+  history.push({role: 'user', content: p}); add('you', p);
+  const out = add('model', ''); let text = '';
+  const r = await fetch('/v1/chat/completions', {method: 'POST', headers: hdr(),
+    body: JSON.stringify({messages: history, stream: true})});
+  if (!r.ok) { out.textContent = (await r.json()).error.message; history.pop(); return; }
+  const reader = r.body.getReader(), dec = new TextDecoder(); let buf = '';
+  for (;;) {
+    const {done, value} = await reader.read(); if (done) break;
+    buf += dec.decode(value, {stream: true});
+    const lines = buf.split('\n\n'); buf = lines.pop();
+    for (const l of lines) {
+      if (!l.startsWith('data: ') || l.includes('[DONE]')) continue;
+      text += JSON.parse(l.slice(6)).choices[0].delta.content || ''; render(out, text);
+    }
+  }
+  history.push({role: 'assistant', content: text});
+}
+async function fix() {
+  const c = prompt('What should the answer have been?'); if (!c) return;
+  const r = await fetch('/api/fix', {method: 'POST', headers: hdr(), body: JSON.stringify({correction: c})});
+  const j = await r.json(); add('system', j.message || j.error.message);
+  if (r.ok && history.length) history[history.length - 1].content = c;
+}
+async function undo() {
+  const r = await fetch('/api/undo', {method: 'POST', headers: hdr()}); const j = await r.json();
+  add('system', j.message || j.error.message);
+}
+function newChat() { history = []; log.innerHTML = ''; }
+q.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } });
+</script>
+</body>
+</html>
