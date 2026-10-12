@@ -122,9 +122,26 @@ class SourceStream:
         return stream_state(self.ds) if self.exact else None
 
 
+def resolve_only(spec, sources):
+    """"images", "text", or a comma-separated list of source names (e.g. "cc12m,cc3m") -> set of source names."""
+    names = set()
+    for part in (p.strip() for p in spec.split(",")):
+        if part == "images":
+            names |= {k for k, v in sources.items() if v["kind"] == "img"}
+        elif part == "text":
+            names |= {k for k, v in sources.items() if v["kind"] == "text"}
+        elif part in sources:
+            names.add(part)
+        else:
+            raise SystemExit(f"unknown source {part!r}. Use text, images, or names from: {', '.join(sources)}")
+    return names
+
+
 class Preparer:
-    def __init__(self, out, until, device="cuda"):
-        self.out, self.until, self.device = Path(out), until, device
+    def __init__(self, out, until, device="cuda", only=None, add=None):
+        """only: restrict this run to these source names (others are left untouched). add: stop after writing this
+        many NEW tokens (instead of stopping at a cumulative total)."""
+        self.out, self.until, self.device, self.only = Path(out), until, device, only
         self.out.mkdir(parents=True, exist_ok=True)
         clean_tmp(self.out)
         self.state_path = self.out / "state.json"
@@ -150,8 +167,15 @@ class Preparer:
         self.stop = threading.Event()
         self.consumed = 0                          # batches taken so far
         self._last_status = (time.time(), dict(self.toks))
+        if add is not None:
+            self.until = sum(self.toks.values()) + add
         self._check_disk()
         self._setup_vision()
+        if self.only:
+            self.exhausted |= set(self.src) - set(self.only)
+            print(f"only writing: {', '.join(k for k in self.src if k not in self.exhausted) or 'nothing'}")
+        if all(k in self.exhausted for k in self.src):
+            raise SystemExit("nothing to do: every selected source is unavailable (image sources need a trained VQ-VAE)")
 
     # ---------- startup ----------
     def _recover_from_shards(self):
@@ -370,10 +394,13 @@ class Preparer:
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Prepare the pretraining mix (resumable, crash-safe).")
     ap.add_argument("--until", type=float, default=DEFAULT_TOTAL, help="stop at this many total tokens, e.g. 90e9")
+    ap.add_argument("--add", type=float, default=None, help="instead: stop after writing this many NEW tokens, e.g. 2e9")
+    ap.add_argument("--only", default=None, help='"images", "text", or source names, e.g. "cc12m,cc3m" (default: all)')
     ap.add_argument("--out", default=str(paths.PRETRAIN_DATA))
     ap.add_argument("--device", default="cuda")
     a = ap.parse_args(argv)
-    Preparer(a.out, a.until, a.device).run()
+    only = resolve_only(a.only, PRETRAIN_SOURCES) if a.only else None
+    Preparer(a.out, a.until, a.device, only=only, add=a.add).run()
 
 
 if __name__ == "__main__":

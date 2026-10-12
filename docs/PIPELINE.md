@@ -55,3 +55,16 @@ How to read it: `cc12m` stuck at a few k tok/s with the network near 20 Mbps (Ta
 bandwidth-bound; low network use with a busy CPU means tokenizing is the limit; `sources ready` near 0 means everything
 is waiting on downloads. Prefetched batches that were not yet written are simply re-read after a restart (progress is
 saved per source only when a batch is consumed), so crashes still lose and repeat nothing.
+
+## Giving images the whole connection: `--only` and `--add`
+
+Text and images share your download bandwidth, and text will happily use almost all of it. To let images catch up, run
+them on their own for a while, then go back to the full mix:
+
+```powershell
+scratchgpt prepare-pretrain --only images --add 2e9    # write 2B NEW image tokens, nothing else, then stop
+scratchgpt prepare-pretrain                            # back to the normal mix (resumes where it stopped)
+```
+
+`--only` accepts `images`, `text`, or source names (`--only cc12m,cc3m`). `--add N` stops after N new tokens in this run;
+without it `--until` is a cumulative total as before. Everything stays resumable and crash-safe.

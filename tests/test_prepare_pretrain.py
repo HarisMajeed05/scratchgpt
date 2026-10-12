@@ -188,3 +188,32 @@ def test_slow_source_does_not_block_the_fast_one(tmp_path, env):
     assert time.time() - t0 < 4              # a blocking design would wait ~8 s for B's share
     assert p.ctoks["a"] > 3 * p.ctoks["b"]
     assert_exact(tmp_path / "slow")
+
+
+def test_only_restricts_the_run_and_later_runs_continue_exactly(tmp_path, env):
+    env()
+    out = tmp_path / "only"
+    pp.Preparer(out, 3_000, "cpu", only={"a"}).run()
+    assert assert_exact(out)["B"] == 0 and assert_exact(out)["A"] > 0
+    pp.Preparer(out, 20_000, "cpu").run()
+    counts = assert_exact(out)
+    assert counts["A"] > 0 and counts["B"] > 0
+
+
+def test_add_stops_after_writing_that_many_new_tokens(tmp_path, env):
+    env()
+    out = tmp_path / "add"
+    pp.Preparer(out, 3_000, "cpu").run()
+    before = len(stream(out))
+    pp.Preparer(out, 10**12, "cpu", add=2_000).run()
+    grew = len(stream(out)) - before
+    assert 2_000 <= grew < 3_000
+    assert_exact(out)
+
+
+def test_resolve_only_names():
+    sources = {"a": dict(kind="text"), "b": dict(kind="img"), "c": dict(kind="img")}
+    assert pp.resolve_only("images", sources) == {"b", "c"}
+    assert pp.resolve_only("text, c", sources) == {"a", "c"}
+    with pytest.raises(SystemExit):
+        pp.resolve_only("nope", sources)
