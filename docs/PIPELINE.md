@@ -36,3 +36,22 @@ image-caption sets), the others fill in.
 ## Disk budget example (300 GB)
 
 180 GB pretraining shards + ~10 GB VQ cache (deletable) + ~1 GB per checkpoint (latest + .prev) + ~5 GB SFT data.
+
+## Why image data is slower, and the status line
+
+Each source is downloaded, decoded and tokenized by its own background thread, a few batches ahead. The main loop takes
+from the most-behind source that has a batch **ready**, so a slow source never stalls the fast ones. Images cost roughly
+100x more bytes per token than text (a whole photo for ~290 tokens), so on a 20 Mbps link expect on the order of
+1B image tokens per day while text keeps flowing at the same time. The image share you configured is a target, not a
+guarantee: the real share is whatever the bandwidth allows.
+
+Once a minute `prepare-pretrain` prints a status line, for example:
+
+```
+status: 310k tok/s | web:240k py:40k cpp:20k cc12m:3k | sources ready 9/11
+```
+
+How to read it: `cc12m` stuck at a few k tok/s with the network near 20 Mbps (Task Manager, Performance) means you are
+bandwidth-bound; low network use with a busy CPU means tokenizing is the limit; `sources ready` near 0 means everything
+is waiting on downloads. Prefetched batches that were not yet written are simply re-read after a restart (progress is
+saved per source only when a batch is consumed), so crashes still lose and repeat nothing.

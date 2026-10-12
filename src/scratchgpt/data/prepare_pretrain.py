@@ -4,6 +4,13 @@ Image-caption pairs become one sequence each, in a random order so the model lea
   caption <|img|> 256 image codes <|/img|> <|endoftext|>     (text -> image)
   <|img|> 256 image codes <|/img|> caption <|endoftext|>     (image -> text)
 
+PARALLEL PREFETCH
+  Every source has its own background thread that downloads, decodes and tokenizes batches ahead of time (a few batches
+  deep). The main loop always takes a batch from the most-behind source that has one READY, so a slow source (images,
+  which cost ~100x more bytes per token than text) can never stall the fast ones; it simply contributes less. Progress is
+  recorded per source and only when a batch is consumed, so prefetched-but-unused batches are re-read after a restart.
+  A status line every minute shows tokens/s per source, which tells you what the bottleneck is.
+
 CRASH SAFETY
   - Every shard and the state file are written to a .tmp file, fsync'ed, then renamed (atomic): a power cut can only
     lose the work since the last shard (~100M tokens), never corrupt anything.
@@ -16,10 +23,13 @@ without --until: the image sources catch up. Never retrain the VQ-VAE after imag
 import argparse
 import glob
 import os
+import queue
 import random
 import shutil
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -36,11 +46,80 @@ DEFAULT_TOTAL = 110e9                      # ~220 GB as uint16
 SHARD, VAL_SHARD = 100_000_000, 10_000_000  # a shard is written once it holds this many tokens
 BATCH_DOCS = 256
 MAX_CHARS = 200_000
+PREFETCH_BATCHES = 3                       # batches each source keeps ready ahead of the main loop
+STATUS_EVERY = 60                          # seconds between status lines
 
 
 def _load_dataset(**kw):
     from datasets import load_dataset
     return load_dataset(**kw)
+
+
+@dataclass
+class Batch:
+    """One tokenized batch plus the stream position AFTER its last document (what state.json records once consumed)."""
+    source: str
+    arrs: list
+    had_items: bool
+    docs_after: int
+    state_after: dict | None
+    ended: bool
+
+
+class SourceStream:
+    """One dataset stream with its own position. Used by exactly one producer thread."""
+
+    def __init__(self, name, spec, docs, state):
+        self.name, self.spec, self.docs, self._state = name, spec, docs, state
+        self.ds, self.exact, self.nxt, self._opened = None, False, None, False
+
+    def _open(self, use_state):
+        s, keys = self.spec, {}
+
+        def make():
+            if s["kind"] == "img":
+                ds, keys["ik"], keys["ck"] = open_pairs(s["kw"]["path"])
+                return ds
+            return _load_dataset(**s["kw"], split="train", streaming=True)
+
+        self.ds, self.exact = resume_stream(make, self._state if use_state else None, self.docs)
+        it = iter(self.ds)
+        if s["kind"] == "img":
+            ik, ck = keys["ik"], keys["ck"]
+
+            def nxt():
+                e = next(it)
+                return e[ik]["bytes"], e[ck]
+        else:
+            field = s["field"]
+
+            def nxt():
+                return next(it)[field][:MAX_CHARS]
+        self.nxt = nxt
+
+    def pull(self, n):
+        out, fails = [], 0
+        while len(out) < n:
+            try:
+                if self.nxt is None:           # first open restores the saved position; a reopen skips `docs` instead
+                    self._open(use_state=not self._opened)
+                    self._opened = True
+                out.append(self.nxt())
+                self.docs += 1
+                fails = 0
+            except StopIteration:
+                break
+            except Exception as e:             # network hiccup / rate limit: reopen at the current position and retry
+                fails += 1
+                if fails > 20:
+                    raise
+                print(f"[{self.name}] {type(e).__name__}: {str(e)[:120]} - retry {fails}/20 in 30s", flush=True)
+                self.nxt = None
+                time.sleep(30)
+        return out
+
+    def state(self):
+        return stream_state(self.ds) if self.exact else None
 
 
 class Preparer:
@@ -59,15 +138,18 @@ class Preparer:
             st.setdefault(key, default)
         self.st = st
         self.src = PRETRAIN_SOURCES
-        self.docs = {k: st["docs"].get(k, 0) for k in self.src}      # live counters
-        self.toks = {k: st["toks"].get(k, 0) for k in self.src}
+        self.toks = {k: st["toks"].get(k, 0) for k in self.src}      # tokens consumed per source
         # "committed" = exactly what is already inside shards on disk; this is what state.json records
-        self.cdocs, self.ctoks = dict(self.docs), dict(self.toks)
+        self.cdocs = {k: st["docs"].get(k, 0) for k in self.src}
+        self.ctoks = dict(self.toks)
         self.cds = {k: st["ds"].get(k) for k in self.src}
-        self.parts, self.count = [], 0             # tokens of fully committed batches not yet written to a shard
-        self.its, self.dss, self.exact, self.opened = {}, {}, {}, set()
+        self.parts, self.count = [], 0             # consumed tokens not yet written to a shard
         self.pool = ThreadPoolExecutor(8)
         self.rng = random.Random(0)
+        self.queues, self.threads, self.errors = {}, {}, queue.Queue()
+        self.stop = threading.Event()
+        self.consumed = 0                          # batches taken so far
+        self._last_status = (time.time(), dict(self.toks))
         self._check_disk()
         self._setup_vision()
 
@@ -129,53 +211,46 @@ class Preparer:
             self.exhausted = {k for k, v in self.src.items() if v["kind"] == "img"}
             print("No trained VQ-VAE yet: image sources skipped. Re-run (without --until) after `scratchgpt vq-train`.")
 
-    # ---------- streaming ----------
-    def _open_src(self, k, use_state):
-        s = self.src[k]
-        keys = {}
+    # ---------- streaming: one prefetching thread per source ----------
+    def _produce(self, k):
+        stream = SourceStream(k, self.src[k], self.cdocs[k], self.cds.get(k))
+        q = self.queues[k]
+        try:
+            while not self.stop.is_set():
+                items = stream.pull(BATCH_DOCS)
+                ended = len(items) < BATCH_DOCS
+                docs_after, state_after = stream.docs, stream.state()
+                arrs = self._tokenize(k, items) if items else []
+                batch = Batch(k, arrs, bool(items), docs_after, state_after, ended)
+                while not self.stop.is_set():
+                    try:
+                        q.put(batch, timeout=0.2)
+                        break
+                    except queue.Full:
+                        continue
+                if ended:
+                    return
+        except BaseException as e:               # handed to the main thread by step()
+            self.errors.put((k, e))
 
-        def make():
-            if s["kind"] == "img":
-                ds, keys["ik"], keys["ck"] = open_pairs(s["kw"]["path"])
-                return ds
-            return _load_dataset(**s["kw"], split="train", streaming=True)
+    def _start(self):
+        if self.queues:
+            return
+        for k in self.src:
+            if k in self.exhausted:
+                continue
+            self.queues[k] = queue.Queue(maxsize=PREFETCH_BATCHES)
+            self.threads[k] = threading.Thread(target=self._produce, args=(k,), name=f"prefetch-{k}", daemon=True)
+            self.threads[k].start()
 
-        ds, exact = resume_stream(make, self.cds.get(k) if use_state else None, self.docs[k])
-        self.dss[k], self.exact[k] = ds, exact
-        it = iter(ds)
-        if s["kind"] == "img":
-            ik, ck = keys["ik"], keys["ck"]
-
-            def nxt():
-                e = next(it)
-                return e[ik]["bytes"], e[ck]
-        else:
-            field = s["field"]
-
-            def nxt():
-                return next(it)[field][:MAX_CHARS]
-        return nxt
-
-    def _pull(self, k, n):
-        out, fails = [], 0
-        while len(out) < n:
-            try:
-                if k not in self.its:
-                    self.its[k] = self._open_src(k, use_state=k not in self.opened)
-                    self.opened.add(k)
-                out.append(self.its[k]())
-                self.docs[k] += 1
-                fails = 0
-            except StopIteration:
-                break
-            except Exception as e:          # network hiccup / rate limit: reopen at the current position and retry
-                fails += 1
-                if fails > 20:
-                    raise
-                print(f"[{k}] {type(e).__name__}: {str(e)[:120]} - retry {fails}/20 in 30s", flush=True)
-                self.its.pop(k, None)
-                time.sleep(30)
-        return out
+    def _raise_producer_errors(self):
+        try:
+            k, e = self.errors.get_nowait()
+        except queue.Empty:
+            return
+        if isinstance(e, KeyboardInterrupt):
+            raise e
+        raise RuntimeError(f"[{k}] data stream failed: {type(e).__name__}: {e}") from e
 
     def _tokenize(self, k, items):
         if self.src[k]["kind"] == "text":
@@ -208,10 +283,6 @@ class Preparer:
         return out
 
     # ---------- checkpointing ----------
-    def _commit(self, k):
-        self.cdocs[k], self.ctoks[k] = self.docs[k], self.toks[k]
-        self.cds[k] = stream_state(self.dss[k]) if self.exact.get(k) else None
-
     def _save_state(self):
         self.st["docs"], self.st["toks"], self.st["ds"] = dict(self.cdocs), dict(self.ctoks), dict(self.cds)
         atomic_json(self.state_path, self.st)
@@ -242,29 +313,46 @@ class Preparer:
             print(f"only {self.count:,} tokens buffered (< 1M, too few for the validation shard); not saved, re-read next run")
 
     # ---------- main loop ----------
+    def _status(self):
+        now = time.time()
+        t0, base = self._last_status
+        if now - t0 < STATUS_EVERY:
+            return
+        rates = {k: (self.toks[k] - base[k]) / (now - t0) for k in self.src if self.toks[k] != base[k]}
+        per = " ".join(f"{k}:{v / 1e3:,.0f}k" for k, v in rates.items())
+        ready = sum(1 for q in self.queues.values() if not q.empty())
+        print(f"status: {sum(rates.values()) / 1e3:,.0f}k tok/s | {per} | sources ready {ready}/{len(self.queues)}", flush=True)
+        self._last_status = (now, dict(self.toks))
+
     def step(self) -> bool:
-        """Process one batch. Returns False when finished."""
+        """Take one prefetched batch from the most-behind source that has one ready. Returns False when finished."""
+        self._raise_producer_errors()
         if sum(self.toks.values()) >= self.until:
             return False
         live = [k for k in self.src if k not in self.exhausted]
         if not live:
             return False
+        self._start()
+        ready = [k for k in live if k in self.queues and not self.queues[k].empty()]
+        if not ready:
+            time.sleep(0.05)                     # nothing ready yet: a slow source never blocks the fast ones
+            return True
         wsum = sum(self.src[k]["share"] for k in live)
         tl = sum(self.toks[k] for k in live) + 1e6
-        k = max(live, key=lambda s: self.src[s]["share"] / wsum * tl - self.toks[s])   # most behind its target share
-        items = self._pull(k, BATCH_DOCS)
-        ended = len(items) < BATCH_DOCS
-        arrs = self._tokenize(k, items) if items else []
-        n = sum(len(a) for a in arrs)
-        self.parts.extend(arrs)
+        k = max(ready, key=lambda s: self.src[s]["share"] / wsum * tl - self.toks[s])   # most behind its target share
+        b = self.queues[k].get()
+        n = sum(len(a) for a in b.arrs)
+        self.parts.extend(b.arrs)
         self.count += n
         self.toks[k] += n
-        if items:
-            self._commit(k)
-        if ended:
+        if b.had_items:                          # progress is committed only when a batch is CONSUMED
+            self.cdocs[k], self.ctoks[k], self.cds[k] = b.docs_after, self.toks[k], b.state_after
+        if b.ended:
             self.exhausted.add(k)
             print(f"[{k}] exhausted at {self.toks[k] / 1e9:.2f}B tokens; other sources will fill in", flush=True)
+        self.consumed += 1
         self._maybe_write()
+        self._status()
         return True
 
     def run(self):
@@ -274,6 +362,7 @@ class Preparer:
         except KeyboardInterrupt:
             print("\nCtrl+C received: saving progress ...", flush=True)
         finally:
+            self.stop.set()
             self._maybe_write(force=True)            # also runs on crashes: whatever is committed goes to disk
         print(f"stopped at {sum(self.ctoks.values()) / 1e9:.2f}B tokens. Re-run the same command to resume.")
 
