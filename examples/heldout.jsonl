@@ -1,0 +1,2 @@
+{"prompt":"What is 19 multiplied by 7? End with Final answer: followed by the numeric answer.","kind":"math","answer":133,"response":"Final answer: 133"}
+{"prompt":"Write only Python code defining double(x) that returns twice x.","kind":"code","tests":"assert double(0) == 0\nassert double(7) == 14\nassert double(-5) == -10","response":"def double(x):\n    return 2 * x"}

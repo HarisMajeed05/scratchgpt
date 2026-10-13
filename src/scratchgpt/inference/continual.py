@@ -91,6 +91,8 @@ def finetune(model, store, steps=60, lr=2e-5, newest=True, device="cuda", replay
 
 class ContinualLearner:
     def __init__(self, engine, steps=60, lr=2e-5):
+        if getattr(engine, "quantized", False):
+            raise LearningError("quantized models are inference-only; correct a floating-point model then export again")
         self.engine, self.steps, self.lr = engine, steps, lr
         self.store = engine.store
         self.snapshots = deque(maxlen=3)

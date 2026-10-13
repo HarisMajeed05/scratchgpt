@@ -1,0 +1,1 @@
+{"architecture":"modern","block_size":32768,"vocab_size":45120,"n_layer":12,"n_head":12,"n_kv_head":3,"n_embd":768,"rope_theta":1000000.0,"rope_scaling":1.0,"gradient_checkpointing":true}

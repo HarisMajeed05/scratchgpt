@@ -33,8 +33,15 @@ An image is `<|img|>` + 256 codes + `<|/img|>`. Because text and image tokens sh
 
 ## Model
 
-`model/gpt.py`: GPT-2-style decoder, 12 layers, 12 heads, width 768, learned positions, tied embeddings, flash attention
-(`scaled_dot_product_attention`), context 1024, ~124M parameters. `prefill` + `decode_step` implement KV-cache decoding.
+`model/gpt.py`: modern decoder, 12 layers, 12 query/3 KV heads, width 768, RoPE (theta 1e6),
+SwiGLU (hidden 2048), RMSNorm, tied embeddings and PyTorch SDPA. The default has 108,989,184 parameters;
+configured context is 32,768, actual pretraining length defaults to 1,024. `prefill`/`decode_step` store reduced-head
+KV caches; cached multi-token chunks use an offset-aware causal mask. Gradient checkpointing is optional.
+Old checkpoints lacking the architecture field select the original GPT-2 decoder and learned positions automatically.
+
+Local teacher answers are decoded and re-tokenized using the student's tokenizer. `posttrain` supplies assistant-only
+SFT/distillation or DPO with a frozen reference; `rlvr` supplies verified-reward REINFORCE. `quantize` exports CPU dynamic
+INT8 linear modules, keeping embeddings/output head and KV cache floating-point. See [UPGRADE_GUIDE.md](UPGRADE_GUIDE.md).
 
 ## Chat format
 
@@ -52,7 +59,7 @@ forces image mode directly. Codes are turned into pixels by the VQ-VAE decoder.
 1. `/api/fix` stores `{context, reply}` in `corrections.jsonl` (the permanent record).
 2. A short fine-tune runs on the new correction + older ones + replayed SFT/pretraining data (anti-forgetting), loss only on
    the corrected reply. The result is saved atomically to `artifacts/live/live.pt`.
-3. At chat time the most similar past corrections (TF-IDF over their questions) are inserted as earlier turns, so a
+3. At chat time the most similar past corrections (FAISS when installed, TF-IDF otherwise) are inserted as earlier turns, so a
    corrected fact works immediately even if the weights haven't absorbed it.
 4. `scratchgpt rebuild` re-applies every correction to the *current* base model after pretraining has moved on.
 

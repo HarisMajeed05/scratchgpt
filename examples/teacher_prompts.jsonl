@@ -1,0 +1,8 @@
+{"prompt":"Explain how attention combines information from other tokens, using a short example."}
+{"prompt":"Explain the difference between supervised fine-tuning and pretraining."}
+{"prompt":"Write a Python function that counts each class name in a list of annotations, with an example."}
+{"prompt":"Explain why a video annotation tracker should discard stale jobs after a manual box correction."}
+{"prompt":"Describe three checks for duplicate bounding boxes in an annotation dataset."}
+{"prompt":"What is 17 multiplied by 23? End with Final answer: followed by the numeric answer.","kind":"math","answer":391}
+{"prompt":"What is 125 divided by 5? End with Final answer: followed by the numeric answer.","kind":"math","answer":25}
+{"prompt":"Write only Python code defining add(a, b) that returns their sum.","kind":"code","tests":"assert add(2, 3) == 5\nassert add(-2, 2) == 0\nassert add(0, 0) == 0"}

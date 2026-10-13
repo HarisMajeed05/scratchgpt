@@ -67,25 +67,52 @@ def main(argv=None):
     ap.add_argument("--save-every", type=int, default=100, help="steps between checkpoints (~20 min by default)")
     ap.add_argument("--milestone-every", type=int, default=5000)
     ap.add_argument("--compile", action="store_true", help="needs triton-windows on Windows, or use WSL2")
+    ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    ap.add_argument("--seq-len", type=int, default=1024, help="actual training length (curriculum: 1k -> 4k -> 8k -> 32k)")
+    ap.add_argument("--context", type=int, default=None, help="configured maximum (new model: 32768; resume: keep checkpoint limit)")
+    ap.add_argument("--base", help="continue pretraining a floating-point checkpoint")
+    ap.add_argument("--layers", type=int, default=12)
+    ap.add_argument("--heads", type=int, default=12)
+    ap.add_argument("--kv-heads", type=int, default=3)
+    ap.add_argument("--width", type=int, default=768)
+    ap.add_argument("--gradient-checkpointing", action="store_true")
+    ap.add_argument("--max-steps", type=int, default=0, help="0 runs until Ctrl+C; otherwise stop at total step")
     a = ap.parse_args(argv)
+    if a.seq_len < 1 or (a.context is not None and a.context < a.seq_len) or min(a.micro_bs, a.accum, a.save_every, a.eval_every, a.milestone_every) < 1:
+        ap.error("positive batch/intervals and seq-len <= context required")
 
-    dev, T = "cuda", 1024
+    dev, T = a.device, a.seq_len
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
     sampler = ShardSampler(a.data, T, dev)
 
-    model = GPT(GPTConfig()).to(dev)
-    opt = model.configure_optimizer(a.lr)
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     clean_tmp(out)
     path, step = out / "latest.pt", 0
     ck = load_torch(path, dev)        # falls back to latest.pt.prev if latest.pt is unreadable
+    if ck is None and a.base:
+        ck = load_torch(a.base, dev)
+        if ck is None:
+            ap.error("base checkpoint not found")
+    if ck and ck.get("quantization"):
+        ap.error("cannot train an INT8 checkpoint")
     if ck:
-        model.load_state_dict(ck["model"])
-        opt.load_state_dict(ck["opt"])
-        step = ck["step"]
-        print(f"resumed at step {step}")
+        model = GPT.from_checkpoint(ck, dev)
+        if model.c.architecture == "modern":
+            model.c.block_size = a.context or model.c.block_size
+        if T > model.c.block_size:
+            ap.error("sequence length exceeds checkpoint context")
+        opt = model.configure_optimizer(a.lr)
+        if "opt" in ck:
+            opt.load_state_dict(ck["opt"])
+        step = ck.get("step", 0)
+        print(f"continued at step {step}")
+    else:
+        model = GPT(GPTConfig(block_size=a.context or 32768, n_layer=a.layers, n_head=a.heads,
+                              n_kv_head=a.kv_heads, n_embd=a.width)).to(dev)
+        opt = model.configure_optimizer(a.lr)
+    model.c.gradient_checkpointing = a.gradient_checkpointing
     cm = torch.compile(model) if a.compile else model
 
     def get_lr(s):
@@ -106,14 +133,14 @@ def main(argv=None):
         tot = 0.0
         for _ in range(20):
             x, y = sampler.batch("val", a.micro_bs)
-            with torch.autocast("cuda", dtype=torch.bfloat16):
+            with torch.autocast(torch.device(dev).type, dtype=torch.bfloat16, enabled=torch.device(dev).type == "cuda"):
                 _, loss = cm(x, y)
             tot += loss.item()
         model.train()
         return tot / 20
 
     try:
-        while True:
+        while not a.max_steps or step < a.max_steps:
             sampler.refresh()
             if not sampler.ready():
                 print("waiting for data shards (need at least one train and one val shard) ...")
@@ -124,7 +151,7 @@ def main(argv=None):
             t0, tot = time.time(), 0.0
             for _ in range(a.accum):
                 x, y = sampler.batch("train", a.micro_bs)
-                with torch.autocast("cuda", dtype=torch.bfloat16):
+                with torch.autocast(torch.device(dev).type, dtype=torch.bfloat16, enabled=torch.device(dev).type == "cuda"):
                     _, loss = cm(x, y)
                 (loss / a.accum).backward()
                 tot += loss.item() / a.accum

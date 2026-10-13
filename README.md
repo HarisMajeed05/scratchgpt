@@ -1,24 +1,26 @@
 # scratchgpt
 
-A multimodal GPT (text, code, images) built **completely from scratch** on one consumer GPU: no API, no pretrained weights.
-Everything is here: tokenizer, image tokenizer (VQ-VAE), data pipeline, pretraining, chat fine-tuning, continual
-learning from your corrections, and an OpenAI-compatible server.
+A modern multimodal decoder with a from-scratch tokenizer/student, local open-weight teacher distillation,
+pretraining, SFT, DPO, verified-reward RL, FAISS retrieval, opt-in web/Python tools, CPU INT8 export and an
+OpenAI-compatible chat server. Image input/output and continual corrections are retained.
 
-> **Status:** the data pipeline's crash-safety, the chat format, the server and the memory are covered by tests
-> (`pytest`). The long training runs have not been completed yet, so there are no published weights or benchmark numbers.
-> Expect a small, honest model, not ChatGPT-level quality (see [Limits](#limits)).
+**Start here: [Complete upgrade guide](docs/UPGRADE_GUIDE.md).** It maps all eight requested improvements to runnable
+commands, explains the local teacher/student loop, and distinguishes implemented features from unmeasured quality gains.
 
-## What it does
+No trained student or teacher weights are bundled. Long training has not been performed; there are no published quality
+benchmarks. The modern default has 108,989,184 parameters and a configurable 32,768-token implementation limit. Useful
+long-context behavior still requires training/evaluation. Existing GPT-2 checkpoints retain their legacy architecture.
 
-| Capability | How |
+| Capability | Implementation |
 |---|---|
-| Chat (multi-turn, system prompt, streaming) | 124M GPT, pretrained on web + code + math, then instruction-tuned on [smol-smoltalk](https://huggingface.co/datasets/HuggingFaceTB/smol-smoltalk) |
-| Code | 28% of pretraining tokens (Python, C++, JS/TS, HTML, CSS) |
-| Image input and output | one token stream: 128px images become 256 discrete codes (VQ-VAE) |
-| Learns from your corrections | `/fix` runs a short fine-tune with replay; every correction is kept in `corrections.jsonl` and can be re-applied to a newer base model |
-| Survives power cuts | atomic, fsync'ed writes with backups; data prep and training resume exactly where they stopped |
-| Use from any client | `/v1/chat/completions` (OpenAI format, SSE streaming), `/v1/images/generations` |
-| Speech-to-text / text-to-speech | planned: token range already reserved, see [roadmap](docs/ROADMAP.md) |
+| Modern decoder | RoPE, 12 query/3 KV heads, SwiGLU, RMSNorm, tied embeddings, SDPA and gradient checkpointing |
+| Better/synthetic data | Local filtering, deduplication, held-out prompt exclusion and locally generated teacher answers |
+| Local distillation | `distill-local`: teacher answers -> quality split -> student next-token cross-entropy |
+| Post-training | SFT, DPO with frozen reference, REINFORCE with numeric/code rewards |
+| Retrieval | FAISS lexical/optional local semantic document and correction memory; TF-IDF fallback |
+| Tools | `agent` with opt-in web search and bounded Docker Python execution |
+| Low-resource inference | Dynamic CPU INT8 linear weights; quantized models are inference-only |
+| Existing multimodal chat | Text/code, 128px VQ-VAE image tokens, streaming server and correction replay |
 
 ## Quick start (Windows + NVIDIA GPU)
 
@@ -26,7 +28,7 @@ learning from your corrections, and an OpenAI-compatible server.
 conda create -n scratchgpt python=3.11 -y
 conda activate scratchgpt
 pip install torch --index-url https://download.pytorch.org/whl/cu128   # CUDA build matching your card (RTX 50xx needs 12.8+)
-pip install -e ".[dev]"
+pip install -e ".[dev,distill,retrieval,tools]"
 hf auth login        # the code dataset is gated: accept its terms on huggingface.co/datasets/bigcode/starcoderdata first
 pytest -q            # optional sanity check
 ```
@@ -78,7 +80,7 @@ scratchgpt/
 │   ├── chat_template.py       conversation <-> tokens, loss masks, image parts
 │   ├── sources.py             datasets and mix ratios (edit these)
 │   ├── safeio.py              atomic writes, backups, resumable streams
-│   ├── model/gpt.py           124M GPT with KV cache
+│   ├── model/gpt.py           about 109M (modern default) GPT with KV cache
 │   ├── vision/                VQ-VAE image tokenizer + image helpers
 │   ├── data/                  tokenizer training, pretraining prep, SFT prep + format
 │   ├── training/              pretrain, sft, vq-vae training
@@ -94,16 +96,16 @@ scratchgpt/
 
 ## Limits
 
-- 124M parameters on one GPU: expect simple chat, short code snippets, and **blurry 128px images** (the VQ-VAE uses
+- about 109M (modern default) parameters on one GPU: expect simple chat, short code snippets, and **blurry 128px images** (the VQ-VAE uses
   L1+MSE only, no GAN or perceptual loss). Fine detail, faces and text in images will not work.
-- Context is 1024 tokens; one image uses 258 of them.
+- Modern context defaults to 32,768 tokens and is configurable; one image uses 258. Long-context quality is unmeasured. Legacy checkpoints retain their saved limit.
 - It learns only from corrections you give it; it cannot tell by itself that an answer was wrong.
 - Small models can be wrong with confidence. Don't rely on it for facts you can't check.
 
 ## Development
 
 ```powershell
-pip install -e ".[dev]"
+pip install -e ".[dev,distill,retrieval,tools]"
 ruff check .
 pytest -q          # torch-dependent tests run automatically when torch is installed
 ```

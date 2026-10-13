@@ -1,6 +1,7 @@
 """Long-term memory of your corrections: stored on disk, retrieved by plain TF-IDF (no pretrained parts)."""
 import json
 import math
+import os
 import re
 import time
 from collections import Counter
@@ -33,6 +34,8 @@ class CorrectionStore:
 
     def __init__(self, path=None):
         self.path = Path(path or paths.CORRECTIONS)
+        self._faiss_signature = None
+        self._faiss_index = None
 
     def all(self):
         if not self.path.exists():
@@ -64,6 +67,18 @@ class CorrectionStore:
         mem = self.all()
         if not mem or not query.strip():
             return []
+        if os.environ.get("SCRATCHGPT_MEMORY_BACKEND", "auto") != "tfidf":
+            try:
+                from .retrieval import FaissRetriever
+                stat = self.path.stat()
+                signature = (stat.st_mtime_ns, stat.st_size)
+                if signature != self._faiss_signature:
+                    self._faiss_index = FaissRetriever([m["query"] for m in mem], os.environ.get("SCRATCHGPT_EMBEDDING_MODEL"))
+                    self._faiss_signature = signature
+                return [mem[i] for i, score in self._faiss_index.search(query, k) if score >= thresh]
+            except ImportError:
+                if os.environ.get("SCRATCHGPT_MEMORY_BACKEND") == "faiss":
+                    raise RuntimeError("FAISS backend requested; install scratchgpt[retrieval]") from None
         docs = [Counter(words(m["query"])) for m in mem]
         df = Counter(w for d in docs for w in d)
         n = len(docs)

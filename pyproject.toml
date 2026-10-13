@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "scratchgpt"
-version = "0.1.0"
-description = "A multimodal GPT (text, code, images) trained completely from scratch on one consumer GPU: tokenizer, VQ-VAE, pretraining, SFT, continual learning and an OpenAI-compatible server."
+version = "0.2.0"
+description = "Modern multimodal decoder with local teacher distillation, SFT/DPO/RL, retrieval, tools and CPU INT8 inference."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 dependencies = [
-  "torch>=2.4",
+  "torch>=2.5,<2.15",
   "numpy",
   "tokenizers>=0.19",
   "datasets>=2.18",   # 2.18+ can save/restore a streaming dataset's position (instant, crash-safe resume)
@@ -22,6 +22,10 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest", "httpx", "ruff"]
+distill = ["transformers>=4.51,<5", "accelerate>=1.0", "safetensors"]
+retrieval = ["faiss-cpu>=1.8"]
+semantic = ["faiss-cpu>=1.8", "sentence-transformers>=3"]
+tools = ["ddgs>=9"]
 
 [project.scripts]
 scratchgpt = "scratchgpt.cli:main"

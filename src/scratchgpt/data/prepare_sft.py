@@ -177,7 +177,36 @@ def main(argv=None):
     ap.add_argument("--shard-rows", type=int, default=50_000)
     ap.add_argument("--image-chats", type=int, default=60_000, help="synthetic image chats to add (0 = none)")
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--local-jsonl", help="quality-filtered train.jsonl + val.jsonl directory, or single JSONL with split field")
     a = ap.parse_args(argv)
+    if a.local_jsonl:
+        from .quality import messages_of, read_rows
+        from .sft_format import write_shard
+        source, out = Path(a.local_jsonl), Path(a.out)
+        out.mkdir(parents=True, exist_ok=True)
+        if list(out.glob("*_*.npz")):
+            ap.error("local import requires a fresh output directory to avoid duplication")
+        buffers, numbers = {"train": [], "val": []}, {"train": 0, "val": 0}
+        files = [source/"train.jsonl", source/"val.jsonl"] if source.is_dir() else [source]
+        def flush(kind):
+            if buffers[kind]:
+                write_shard(out/f"{kind}_{numbers[kind]:05d}.npz", buffers[kind])
+                numbers[kind] += 1
+                buffers[kind] = []
+        for file in files:
+            for row in read_rows(file):
+                kind = row.get("split", file.stem if file.stem in buffers else "train")
+                if kind not in buffers:
+                    ap.error("split must be train or val")
+                ids, mask = fit_conversation(messages_of(row), a.max_len)
+                if len(ids) >= 2 and any(mask):
+                    buffers[kind].append((ids, mask))
+                if len(buffers[kind]) >= a.shard_rows:
+                    flush(kind)
+        for kind in buffers:
+            flush(kind)
+        print("imported local SFT shards", numbers)
+        return
     SFTPreparer(a.out, a.max_len, a.shard_rows, a.image_chats, a.device).run()
 
 

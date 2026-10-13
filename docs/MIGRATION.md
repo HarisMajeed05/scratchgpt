@@ -1,3 +1,17 @@
+# Version 0.2 checkpoint migration
+
+New `GPTConfig()` selects the modern RoPE/GQA/SwiGLU/RMSNorm model. Old checkpoints lacking
+`architecture` load as `legacy` with unchanged tensors. They remain usable with the original chat/image token layout.
+Never label legacy weights as modern: shapes/parameters differ. Train a new modern checkpoint and distill from a
+local teacher. Existing tokenized data is compatible when the same tokenizer and VQ checkpoint are retained.
+
+INT8 exports carry `quantization: dynamic-int8` and load only on CPU. The server disables correction training
+for these exports. DPO/RL checkpoints can be served with `--checkpoint`; default checkpoint priority is unchanged.
+
+See [UPGRADE_GUIDE.md](UPGRADE_GUIDE.md) for commands and limits.
+
+---
+
 # Migrating from the old flat layout
 
 Before the restructure everything lived in one folder (`data/`, `ckpt_vq/`, `tokenizer.json`, ...). The on-disk formats

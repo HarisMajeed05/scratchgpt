@@ -36,16 +36,19 @@ def main(argv=None):
     ap.add_argument("--save-every", type=int, default=200)
     ap.add_argument("--eval-every", type=int, default=500)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     a = ap.parse_args(argv)
+    if min(a.micro_bs, a.accum, a.save_every, a.eval_every) < 1 or a.epochs <= 0:
+        ap.error("batch sizes, intervals and epochs must be positive")
 
-    dev = "cuda"
+    dev = a.device
     shards, rows = _load_rows(a.data, "train")
     vshards, vrows = _load_rows(a.data, "val")
     if not rows:
         raise SystemExit("no SFT data found. Run: scratchgpt prepare-sft")
     N, cps = len(rows), a.micro_bs * a.accum
-    steps_per_epoch = max(N // cps, 1)
-    total = int(steps_per_epoch * a.epochs)
+    steps_per_epoch = max(math.ceil(N / cps), 1)
+    total = max(1, math.ceil(steps_per_epoch * a.epochs))
     print(f"{N:,} train conversations, {len(vrows):,} val | {steps_per_epoch} steps/epoch, {total} steps total")
 
     out = Path(a.out)
@@ -93,7 +96,7 @@ def main(argv=None):
         for _ in range(10):
             idx = rng.choice(len(vrows), size=min(a.micro_bs, len(vrows)), replace=False)
             x, y = make_batch(vshards, vrows, idx)
-            with torch.autocast("cuda", dtype=torch.bfloat16):
+            with torch.autocast(torch.device(dev).type, dtype=torch.bfloat16, enabled=torch.device(dev).type == "cuda"):
                 _, loss = model(x, y)
             tot += loss.item()
             n += 1
@@ -105,16 +108,17 @@ def main(argv=None):
         while step < total:
             epoch, k = divmod(step, steps_per_epoch)
             order = np.random.default_rng(a.seed + epoch).permutation(N)
-            chunk = order[k * cps:(k + 1) * cps]
+            chunk = order[k * cps:min((k + 1) * cps, N)]
+            micros = [chunk[m:m+a.micro_bs] for m in range(0, len(chunk), a.micro_bs)]
             for g in opt.param_groups:
                 g["lr"] = lr_at(step)
             t0, tot = time.time(), 0.0
-            for m in range(a.accum):
-                x, y = make_batch(shards, rows, chunk[m * a.micro_bs:(m + 1) * a.micro_bs])
-                with torch.autocast("cuda", dtype=torch.bfloat16):
+            for micro in micros:
+                x, y = make_batch(shards, rows, micro)
+                with torch.autocast(torch.device(dev).type, dtype=torch.bfloat16, enabled=torch.device(dev).type == "cuda"):
                     _, loss = model(x, y)
-                (loss / a.accum).backward()
-                tot += loss.item() / a.accum
+                (loss / len(micros)).backward()
+                tot += loss.item() / len(micros)
             norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
             opt.zero_grad(set_to_none=True)

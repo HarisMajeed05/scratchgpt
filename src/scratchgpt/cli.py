@@ -3,6 +3,16 @@ import importlib
 import sys
 
 COMMANDS = {
+    "distill-local": ("scratchgpt.training.distill_local", "local teacher -> quality data -> student training"),
+    "evaluate": ("scratchgpt.training.evaluate", "held-out perplexity and verified task accuracy"),
+    "local-pretrain": ("scratchgpt.data.local_pretrain", "tokenize quality-filtered local text into pretraining shards"),
+    "quality-data": ("scratchgpt.data.quality", "filter/dedup local JSONL and split held-out prompt groups"),
+    "teacher-data": ("scratchgpt.data.distill", "generate synthetic answers using a local open-weight teacher"),
+    "posttrain": ("scratchgpt.training.posttrain", "local SFT, sequence distillation or DPO"),
+    "rlvr": ("scratchgpt.training.rl", "REINFORCE with verified math/code rewards"),
+    "quantize": ("scratchgpt.inference.quantize", "export CPU dynamic INT8 inference checkpoint"),
+    "memory-ingest": ("scratchgpt.inference.retrieval", "chunk local documents for FAISS retrieval"),
+    "agent": ("scratchgpt.inference.tools", "local model with opt-in web/Python tools and document retrieval"),
     "train-tokenizer": ("scratchgpt.data.train_tokenizer", "1. train the 32k BPE text tokenizer"),
     "prepare-pretrain": ("scratchgpt.data.prepare_pretrain", "2. stream + tokenize the pretraining mix into shards"),
     "vq-cache": ("scratchgpt.training.train_vqvae", "3a. cache images for the image tokenizer (use: vq-cache)"),

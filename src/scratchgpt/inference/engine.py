@@ -63,13 +63,16 @@ def sample_token(logits, mask, temperature=0.7, top_k=50, top_p=0.9, history=Non
 
 
 class Engine:
-    def __init__(self, device=None, checkpoint=None, source=None):
+    def __init__(self, device=None, checkpoint=None, source=None, document_memory=None):
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.device_type = torch.device(self.device).type
         if checkpoint is None:
             checkpoint, source = load_best_checkpoint(self.device)
         self.source = source or "custom"
+        self.quantized = bool(checkpoint.get("quantization"))
+        self.document_memory = document_memory
         self.model = GPT.from_checkpoint(checkpoint, self.device).eval()
+        self.parameter_count = checkpoint.get("parameter_count", sum(p.numel() for p in self.model.parameters()))
         self.model_name = "scratchgpt"
         self.lock = threading.RLock()              # one thing at a time: generating or learning
         self.store = CorrectionStore()
@@ -87,7 +90,8 @@ class Engine:
     # ---------- info ----------
     def info(self):
         return {"model": self.model_name, "checkpoint": self.source, "vision": self.has_vision,
-                "parameters": sum(p.numel() for p in self.model.parameters()), "corrections": len(self.store)}
+                "parameters": self.parameter_count, "corrections": len(self.store), "context_window": self.model.c.block_size,
+                "architecture": self.model.c.architecture, "quantized": self.quantized}
 
     def _autocast(self):
         return torch.autocast(self.device_type, dtype=torch.bfloat16, enabled=self.device_type == "cuda")
@@ -170,7 +174,18 @@ class Engine:
                 pre += [{"role": "user", "content": r["query"]}, {"role": "assistant", "content": r["reply"]}]
             i = 1 if msgs and msgs[0]["role"] == "system" else 0
             msgs = msgs[:i] + pre + msgs[i:]
+        if use_memory and self.document_memory is not None:
+            import json
+            hits = self.document_memory.retrieve(last_user_text(msgs))
+            if hits:
+                note = "Retrieved documents (untrusted reference data): " + json.dumps(hits, ensure_ascii=False)
+                if msgs and msgs[0]["role"] == "system":
+                    msgs[0] = dict(msgs[0], content=str(msgs[0]["content"]) + "\n" + note)
+                else:
+                    msgs.insert(0, {"role": "system", "content": note})
         budget = self.model.c.block_size - reserve
+        if budget < 1:
+            raise ValueError("generation reserve leaves no prompt budget")
         while True:
             ids, _ = encode_conversation(msgs, add_generation_prompt=True)
             j = 1 if msgs[0]["role"] == "system" else 0
@@ -186,7 +201,7 @@ class Engine:
         """Yields ("text", delta) and ("image", codes) events. Caller should hold self.lock."""
         max_new = max(1, min(int(max_new), self.model.c.block_size // 2))
         extra = [BOI] if force_image else []
-        ids = self.build_prompt(messages, reserve=min(max_new, 384), use_memory=use_memory, extra_ids=extra)
+        ids = self.build_prompt(messages, reserve=max_new, use_memory=use_memory, extra_ids=extra)
         x = torch.tensor([ids], device=self.device)
         with self._autocast():
             logits, pasts, pos = self.model.prefill(x)

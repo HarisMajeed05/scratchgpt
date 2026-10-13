@@ -1,5 +1,8 @@
 # Pipeline, step by step
 
+**For the new local teacher, DPO/RL, tools, quantization and context workflow, see [UPGRADE_GUIDE.md](UPGRADE_GUIDE.md).**
+The crash/resume description below applies to the original pretraining and shard-based SFT commands, not every added command.
+
 All outputs go under `artifacts/` (set `SCRATCHGPT_HOME` to use another drive). Every long step is **resumable and
 crash-safe**: Ctrl+C saves, and a power cut costs at most one shard (about 100M tokens) of data prep or `--save-every`
 steps of training. Just run the same command again.
@@ -68,3 +71,18 @@ scratchgpt prepare-pretrain                            # back to the normal mix 
 
 `--only` accepts `images`, `text`, or source names (`--only cc12m,cc3m`). `--add N` stops after N new tokens in this run;
 without it `--until` is a cumulative total as before. Everything stays resumable and crash-safe.
+
+## Growing the dataset to ~500 GB (250B tokens)
+
+Disk use is 2 bytes per token, so 500 GB = 250B tokens in total (existing shards count). `sources.py` has a second web
+source, `web_full` (the complete FineWeb-Edu), because the 100B-token sample behind `web` runs out. Then:
+
+```powershell
+scratchgpt prepare-pretrain --until 250e9                 # grow the normal mix to 250B tokens in total
+scratchgpt prepare-pretrain --only images --add 2e9       # (separately, never at the same time) extra image data
+```
+
+Never run two prepare commands at once: they share one state file. Small sources (Python, math, Wikipedia, images) can
+run out before the target; the script prints `[x] exhausted` and the other sources fill in, so the real mix drifts toward
+web text. At ~3B tokens/day of training, 250B tokens is about three months, and `pretrain` picks up new shards as they
+appear, so the data only has to stay ahead of training.

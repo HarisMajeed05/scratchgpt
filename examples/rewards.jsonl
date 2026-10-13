@@ -1,0 +1,3 @@
+{"prompt":"What is 12 multiplied by 13? End with Final answer: followed by the numeric answer.","kind":"math","answer":156}
+{"prompt":"What is 81 divided by 9? End with Final answer: followed by the numeric answer.","kind":"math","answer":9}
+{"prompt":"Write only Python code defining square(x) that returns x squared.","kind":"code","tests":"assert square(0) == 0\nassert square(3) == 9\nassert square(-4) == 16"}

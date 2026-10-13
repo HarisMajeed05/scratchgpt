@@ -52,7 +52,7 @@ def load_torch(path, map_location="cpu"):
     for p in (path, path + ".prev"):
         if os.path.exists(p):
             try:
-                return torch.load(p, map_location=map_location)
+                return torch.load(p, map_location=map_location, weights_only=True)
             except Exception as e:
                 print(f"{p} unreadable ({type(e).__name__}); trying backup", flush=True)
     return None
